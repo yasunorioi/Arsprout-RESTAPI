@@ -277,6 +277,35 @@ agriha/farm/weather/WRadiation   → {"value": 612, "unit": "W m-2", "ts": 17400
 
 ---
 
+### 2.6 目標室温 setpoint (Publish) — 中央ブレーン
+
+中央ブレーン（unipi-daemon）が**時間帯別の目標室温**を各ハウスへ配信する。
+リレー/窓ノード（ccm_rp 等）がこれを subscribe し、室温を保つよう側窓を制御する。
+スケジュール設計の詳細は `setpoint-schedule-design.md`、ノード側制御は
+`ccm_rp2350_relay/docs/mqtt-control-design.md`（model B）。
+
+```
+agriha/{house_id}/setpoint/temp
+```
+
+| 項目 | 値 |
+|------|-----|
+| 方向 | brain(daemon) → broker → ノード |
+| QoS | 1 |
+| retain | **True**（ノード起動/再接続時に即取得、ブレーン停止中も保持） |
+| パブリッシャー | `setpoint_scheduler`（unipi-daemon, 予定） |
+| タイミング | `publish_interval_s`（既定 30s）＋ 値変化時 |
+
+**ペイロード（§0.4 統一形）:**
+```json
+{ "value": 22.5, "unit": "C", "ts": 1740000000 }
+```
+- `value` ＝ その時間帯にノードが保つべき目標室温℃（＝換気開始温度）。
+- 比例帯(band)・強風/降雨セーフティは**ノード側**が持つ（中央は setpoint 1値のみ）。
+- ArSprout `STD_ATMP`（期間別目標温度）の置き換え。
+
+---
+
 ## 3. 緊急制御トピック (Emergency)
 
 ### 3.1 緊急オーバーライド通知 (Publish)
@@ -431,6 +460,8 @@ SENSOR_TYPES / ACTUATOR_TYPES / WEATHER_TYPES いずれにも該当しない ccm
 | `agriha/{house_id}/relay/{ch}/set` | broker→daemon | 1 | ✗ | `mqtt_relay_bridge.py` |
 | `agriha/{house_id}/sensor/DS18B20` | daemon→broker | 1 | ✓ | `sensor_loop.py` |
 | `agriha/farm/weather/misol` | daemon→broker | 1 | ✓ | `sensor_loop.py` |
+| `agriha/farm/weather/{type}` | sensor→broker | 1 | ✓ | §2.5 canonical |
+| `agriha/{house_id}/setpoint/temp` | brain→broker→node | 1 | ✓ | `setpoint_scheduler`（予定） |
 | `agriha/{house_id}/emergency/override` | daemon→broker | 1 | ✓ | `emergency_override.py` |
 | `agriha/{house_id}/ccm/sensor/{ccm_type}` | daemon→broker | 0 | ✓ | `ccm_receiver.py` |
 | `agriha/{house_id}/ccm/actuator/{ccm_type}` | daemon→broker | 0 | ✓ | `ccm_receiver.py` |
