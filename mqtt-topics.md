@@ -18,6 +18,60 @@
 
 ---
 
+## 0. 設計方針・命名規約（canonical spec）
+
+> **方針**: ArSprout 本体は段階的に廃止し、農場全体を **agriha MQTT** に集約する。
+> 各ノード（agri-* センサー / ccm_rp 等のリレー・窓ノード）が直接この体系で
+> publish / subscribe する。UECS-CCM ブリッジ（§4）は移行期の互換層で、最終的に不要。
+> SNMP のような無秩序化を防ぐため、以下の規約を**必ず**守る。
+
+### 0.1 名前空間（スコープ）
+```
+agriha/<scope>/<category>/<name>
+```
+| 要素 | 値 | 意味 |
+|------|-----|------|
+| `<scope>` | `{house_id}`（例 `h01`） | **ハウス局所**データ（そのハウス内のみ意味を持つ） |
+| `<scope>` | `farm` | **農場共有(public)**データ（全ハウスが参照しうる：屋外気象・日射・風） |
+| `<category>` | `sensor` / `relay` / `actuator` / `weather` / `emergency` / `ccm` / `sys` | 種別 |
+| `<name>` | **UECS-CCM 型名**（`InAirTemp` 等） | 下記 0.3 の正準語彙のみ使用 |
+
+- **局所 vs 共有の判定**: 値が「このハウス固有」か「農場全体で共通」か。
+  室内環境(InAir*/Soil*)＝局所、屋外気象(W*)・日射＝共有。
+- 局所は `agriha/{house_id}/sensor/{type}`、共有は **`agriha/farm/weather/{type}`**（§2.5）。
+
+### 0.2 1値1トピック原則
+- **1 つの物理量＝1 トピック**（`agriha/farm/weather/WWindSpeed` 等）。
+  Misol のような多値ブロブ（§2.2）は機器 raw として併存可だが、**正準の消費先は分解型**。
+- これにより購読側は必要な値だけ subscribe でき、トピックの意味が一意に定まる。
+
+### 0.3 型名（正準語彙）= UECS-CCM 型を採用
+独自名を増やさない。新しい量は UECS 型を踏襲（無ければ UECS 命名規則に倣う）。
+- 室内: `InAirTemp` `InAirHumid` `InAirCO2` `InAirAbsHumid` `InAirDP` `InAirHD`
+- 土壌: `SoilTemp` `SoilEC` `SoilWC`
+- 屋外/農場共有: `WAirTemp` `WAirHumid` `WWindSpeed` `WWindDir` `WRainfallAmt` `WRadiation`(日射) `IntgRadiation`
+- アクチュエータ: `VenSdWin` `CirHoriFan` `Irri` `LsCrtn` 等（開度% or ON/OFF）
+
+### 0.4 ペイロード規約（統一 JSON）
+センサー/計測値は次の統一形を基本とする（機器固有の多フィールド blob は例外）:
+```json
+{ "value": 23.5, "unit": "C", "ts": 1740000000 }
+```
+| キー | 型 | 説明 |
+|------|-----|------|
+| `value` | number/null | 値（無効時 null） |
+| `unit` | string | 単位（UECS 準拠：`C` `%` `ppm` `m s-1` `MJ` `W m-2` 等） |
+| `ts` | number | UNIX タイムスタンプ（秒） |
+
+### 0.5 QoS / retain ポリシー
+| 用途 | QoS | retain | 理由 |
+|------|-----|--------|------|
+| センサー値・状態（sensor/weather/relay state） | 1 | **true** | 起動直後に最新値を即取得（特に風速等の安全系） |
+| 制御コマンド（relay/{ch}/set 等） | 1 | false | コマンドは一過性、retain 厳禁 |
+| CCM ブリッジ（§4・移行期） | 0 | true | 既存実装踏襲 |
+
+---
+
 ## 1. リレー制御トピック
 
 ### 1.1 リレー状態 (Publish)
@@ -186,6 +240,40 @@ agriha/farm/weather/misol
 > `wh65lp_reader.parse_frame()` の返却10フィールドに `sensor_loop.py` L.129 が `timestamp` を追記して publish（全11フィールド）。
 > Misol フレームは基本17バイトと拡張21バイト（気圧付き）の2種類あり、`pressure_hpa` は拡張フレーム時のみ値が入る。
 > Misol フレームのシンク待ちタイムアウトは 20 秒（pyserial 未インストール時は無効）。
+
+---
+
+### 2.5 農場共有（public）気象センサー (Publish) — canonical
+
+屋外気象・日射・風など **農場全体で共有**する量の正準置き場（§0.1 の `farm` スコープ、§0.2 の 1値1トピック）。
+**機種非依存**：Misol（§2.2 の blob を分解）でも専用風速計でも agri-rain/agri-solar でも、測った者が該当 type トピックへ publish する。
+
+```
+agriha/farm/weather/{type}
+```
+
+| 項目 | 値 |
+|------|-----|
+| 方向 | 各センサーノード → broker |
+| QoS | 1 |
+| retain | **True**（安全系の即時取得のため必須） |
+| `{type}` | `WAirTemp` `WAirHumid` `WWindSpeed` `WWindDir` `WRainfallAmt` `WRadiation`(日射) `IntgRadiation` 等（§0.3） |
+
+**トピック例 / ペイロード（§0.4 統一形）:**
+```
+agriha/farm/weather/WWindSpeed   → {"value": 4.9, "unit": "m s-1", "ts": 1740000000}
+agriha/farm/weather/WWindDir     → {"value": 270, "unit": "deg",   "ts": 1740000000}
+agriha/farm/weather/WAirTemp     → {"value": 4.6, "unit": "C",     "ts": 1740000000}
+agriha/farm/weather/WRainfallAmt → {"value": 0.0, "unit": "mm",    "ts": 1740000000}
+agriha/farm/weather/WRadiation   → {"value": 612, "unit": "W m-2", "ts": 1740000000}
+```
+
+**消費例（各ハウスの制御ノード = ccm_rp 等）:**
+- `agriha/{house_id}/sensor/#`（自ハウス局所）＋ `agriha/farm/weather/#`（農場共有）の両方を subscribe。
+- `WWindSpeed` → 強風時に側窓を強制クローズ（安全）、`WRadiation` → 日射連動灌水、等。
+
+> 既存の `agriha/farm/weather/misol`（§2.2 多値 blob）は機器 raw として併存可。
+> 正準の消費は本 §2.5 の分解型トピックを使う（publisher 側で分解 publish するか、ブリッジで変換）。
 
 ---
 
