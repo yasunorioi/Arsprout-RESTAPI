@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-# agriha CCM -> MQTT ブリッジ（一方向）
+# agriha CCM -> MQTT ブリッジ（一方向・ArSprout 専用）
 # UECS-CCM (UDP マルチキャスト 224.0.0.1:16520) を受信し、agriha MQTT 体系へ republish。
-# ArSprout 廃止までの移行期に、既存 CCM センサ(.27別棟/.71気象/.70本棟/.80新棟)を
+# ArSprout 廃止までの移行期に、ArSprout 系 CCM センサ(.71気象/.70本棟/.80新棟)を
 # agriha トピックで供給し、ccm_rp 等の MQTT ノードへ橋渡しする。
+# agri-* 自作ノードは 2026-06-07 以降 agriha MQTT を直接 publish する（CCM 撤去済）
+# ため、ここでは扱わない。
 #
 # 設計参照: arsprout-analysis/skills/uecs-mqtt-bridge-generator.md（自作Node-RED版の後継）、
 #           Arsprout-RESTAPI/mqtt-topics.md（§0 命名規約・§2.5 farm weather）。
@@ -17,7 +19,7 @@ BROKER, MQTT_PORT = "localhost", 1883
 
 # (room, region) -> (scope, category)。scope=house_id(int) または "farm"。
 SCOPE_MAP = {
-    (1, 13): (2, "sensor"),        # 別棟 .27 → house 2（.224 が制御入力に使用）
+    # (1,13) 別棟 .27 agri-env は撤去済み: v0.4.0 から agriha/2/sensor/* を直接 publish
     (1, 41): ("farm", "weather"),  # 屋外気象 .71 → farm 共有
     (1, 11): (1, "sensor"),        # 本棟旧 .70 → house 1
     (1, 12): (3, "sensor"),        # 新棟 .80 → house 3
