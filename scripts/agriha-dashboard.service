@@ -1,0 +1,12 @@
+[Unit]
+Description=agriha dashboard (read-only, :8000)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/agriha_dashboard.py
+Restart=always
+RestartSec=5
+User=pi
+[Install]
+WantedBy=multi-user.target

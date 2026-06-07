@@ -339,7 +339,13 @@ class H(BaseHTTPRequestHandler):
         elif self.path.startswith("/history"):
             self._send(page_history(parse_qs(urlparse(self.path).query)))
         elif self.path == "/" or self.path.startswith("/index"):
-            self._send(page_dashboard())
+            # ダッシュボードは :8000 (agriha_dashboard.py) へ移設。8080 は設定/履歴専用。
+            host = self.headers.get("Host", "pi4.local:8080")
+            base = host.rsplit(":", 1)[0]
+            self.send_response(302)
+            self.send_header("Location", f"http://{base}:8000/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         else:
             self._send("not found", 404, "text/plain")
 
