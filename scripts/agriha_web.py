@@ -5,13 +5,16 @@
 #   POST /api/schedule: agriha_schedule.json 保存（scheduler が mtime で自動再読込）
 # 設計: Arsprout-RESTAPI/setpoint-schedule-design.md / mqtt-topics.md
 
-import json, subprocess, time, html, os
+import json, subprocess, time, html, os, sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 PORT = 8080
 BROKER = "localhost"
 SCHED_FILE = "/home/pi/agriha_schedule.json"
+DB_FILE = "/home/pi/agriha_history.db"   # agriha_logger.py が書く時系列DB
+PALETTE = ["#6cf", "#ffd24d", "#7fd", "#f88", "#c9f", "#8f8", "#fb7", "#9cf"]
+RANGES = [("1h", 3600), ("6h", 21600), ("24h", 86400), ("7d", 604800), ("30d", 2592000)]
 
 # ---------- MQTT snapshot ----------
 def snapshot():
@@ -79,6 +82,10 @@ textarea{width:100%;height:160px;background:#0c0e12;color:#cfe;border:1px solid 
   border-radius:6px;font-family:monospace;font-size:14px;padding:8px}
 button{background:#2563eb;color:#fff;border:0;padding:8px 18px;border-radius:6px;cursor:pointer;font-size:14px}
 .msg{margin-left:12px}
+.controls{padding:10px 12px;background:#1a1d24;border:1px solid #2c313c;border-radius:8px;margin:0 0 12px}
+.chk{display:inline-block;margin:2px 12px 2px 0;font-size:12px;color:#ccd;white-space:nowrap}
+.rg{margin-right:12px;font-size:13px;color:#cde}
+svg{max-width:100%;margin-bottom:12px}
 """
 
 def kv_table(d, cls=""):
@@ -137,7 +144,7 @@ def page_dashboard():
     return f"""<!doctype html><html><head><meta charset=utf-8>
 <meta http-equiv=refresh content=10><title>agriha</title><style>{CSS}</style></head><body>
 <header>🌱 agriha <span class=age>{time.strftime('%H:%M:%S')} · 10s refresh</span>
-<a href=/>dashboard</a><a href=/schedule>schedule</a></header>
+<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a></header>
 <div class=wrap>{''.join(cards)}</div>
 <p class=note>retained snapshot via mosquitto_sub. window: 現在%→目標% ▶/■ source。</p>
 </body></html>"""
@@ -186,7 +193,7 @@ def page_schedule(msg=""):
     txt = html.escape(sched_to_text(load_sched()))
     return f"""<!doctype html><html><head><meta charset=utf-8><title>agriha schedule</title>
 <style>{CSS}</style></head><body>
-<header>🌱 agriha — setpoint schedule<a href=/>dashboard</a><a href=/schedule>schedule</a></header>
+<header>🌱 agriha — setpoint schedule<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a></header>
 <div class=wrap><div class=card style=min-width:520px>
 <h2>時間帯別 目標室温（℃）</h2>
 <p class=note>1行=1ハウス。書式: <code>house: HH:MM=temp, HH:MM=temp, ...</code>（例 <code>2: 06:00=22, 10:00=26, 20:00=20</code>）。
@@ -195,6 +202,126 @@ def page_schedule(msg=""):
 <textarea name=sched>{txt}</textarea><br><br>
 <button type=submit>保存</button><span class=msg>{html.escape(msg)}</span>
 </form></div></div></body></html>"""
+
+# ---------- history (SQLite + サーバ側SVG) ----------
+def db_ro():
+    # WAL の reader。ロガーが書込み中でも読める。読み取り専用で開く。
+    return sqlite3.connect(f"file:{DB_FILE}?mode=ro", uri=True, timeout=3)
+
+def list_series():
+    try:
+        db = db_ro()
+        rows = db.execute("SELECT key, unit FROM series ORDER BY key").fetchall()
+        db.close()
+        return rows
+    except Exception:
+        return []
+
+def fetch_series(key, frm, to, maxpts=600):
+    """[(ts,value)...], unit を返す。raw(30日)＋agg(5分平均)を結合し maxpts へ間引き。"""
+    try:
+        db = db_ro()
+        r = db.execute("SELECT id, unit FROM series WHERE key=?", (key,)).fetchone()
+        if not r:
+            db.close(); return [], ""
+        sid, unit = r
+        rows = db.execute(
+            "SELECT ts,value FROM samples WHERE sid=? AND ts>=? AND ts<=? "
+            "UNION ALL SELECT ts,value FROM samples_agg WHERE sid=? AND ts>=? AND ts<=? "
+            "ORDER BY ts", (sid, frm, to, sid, frm, to)).fetchall()
+        db.close()
+    except Exception:
+        return [], ""
+    if len(rows) > maxpts:               # 時間バケット平均でダウンサンプル
+        bw = max(1.0, (to - frm) / maxpts)
+        buckets = {}
+        for ts, v in rows:
+            b = int((ts - frm) // bw)
+            acc = buckets.get(b)
+            if acc:
+                acc[0] += v; acc[1] += 1
+            else:
+                buckets[b] = [v, 1, ts]
+        rows = [(buckets[b][2], buckets[b][0] / buckets[b][1]) for b in sorted(buckets)]
+    return rows, unit
+
+def svg_chart(group, unit, frm, to, w=900, h=300):
+    """group=[(key,[(ts,v)...])...] を同一単位で重ね描き。"""
+    ml, mr, mt, mb = 56, 150, 18, 28
+    iw, ih = w - ml - mr, h - mt - mb
+    vals = [v for _, pts in group for _, v in pts]
+    if not vals:
+        return f"<svg width={w} height={h}></svg>"
+    vmin, vmax = min(vals), max(vals)
+    if vmin == vmax:
+        vmin -= 1; vmax += 1
+    pad = (vmax - vmin) * 0.08
+    vmin -= pad; vmax += pad
+    span = max(1, to - frm)
+    def X(ts): return ml + iw * (ts - frm) / span
+    def Y(v):  return mt + ih * (1 - (v - vmin) / (vmax - vmin))
+    p = [f"<svg width={w} height={h} style='background:#0c0e12;border:1px solid #2c313c;border-radius:6px'>"]
+    for i in range(5):                    # y グリッド＋目盛
+        v = vmin + (vmax - vmin) * i / 4; y = Y(v)
+        p.append(f"<line x1={ml} y1={y:.1f} x2={ml+iw} y2={y:.1f} stroke='#222'/>")
+        p.append(f"<text x={ml-6} y={y+4:.1f} fill='#778' font-size=11 text-anchor=end>{v:.1f}</text>")
+    long_range = (to - frm) > 2 * 86400
+    for i in range(5):                    # x 時刻目盛
+        ts = frm + (to - frm) * i / 4; x = X(ts)
+        lbl = time.strftime('%m/%d %H:%M' if long_range else '%H:%M', time.localtime(ts))
+        p.append(f"<line x1={x:.1f} y1={mt} x2={x:.1f} y2={mt+ih} stroke='#1a1d24'/>")
+        p.append(f"<text x={x:.1f} y={h-8} fill='#778' font-size=11 text-anchor=middle>{lbl}</text>")
+    p.append(f"<text x={ml} y=13 fill='#9cf' font-size=12>{html.escape(unit or '(no unit)')}</text>")
+    for idx, (key, pts) in enumerate(group):
+        col = PALETTE[idx % len(PALETTE)]
+        if pts:
+            d = " ".join(f"{X(ts):.1f},{Y(v):.1f}" for ts, v in pts)
+            p.append(f"<polyline fill=none stroke='{col}' stroke-width=1.5 points='{d}'/>")
+        ly = mt + 14 + idx * 16
+        short = key.split('/', 2)[-1] if key.count('/') >= 2 else key
+        p.append(f"<rect x={ml+iw+10} y={ly-9} width=10 height=10 fill='{col}'/>")
+        p.append(f"<text x={ml+iw+24} y={ly} fill='#ccd' font-size=11>{html.escape(short)}</text>")
+    p.append("</svg>")
+    return "".join(p)
+
+def page_history(qs):
+    sel = qs.get("s", [])
+    rng = qs.get("range", ["24h"])[0]
+    secs = dict(RANGES).get(rng, 86400)
+    to = int(time.time()); frm = to - secs
+
+    boxes = []
+    for key, unit in list_series():
+        chk = "checked" if key in sel else ""
+        boxes.append(f"<label class=chk><input type=checkbox name=s value='{html.escape(key)}' {chk}>"
+                     f" {html.escape(key)} <span class=age>{html.escape(unit or '')}</span></label>")
+    if not boxes:
+        boxes.append("<span class=note>系列なし（agriha-logger 稼働中？ DB未生成？）</span>")
+    rads = "".join(f"<label class=rg><input type=radio name=range value={r} {'checked' if r == rng else ''}>{r}</label>"
+                   for r, _ in RANGES)
+
+    charts = []
+    if sel:
+        byunit = {}
+        for key in sel:
+            pts, unit = fetch_series(key, frm, to)
+            byunit.setdefault(unit, []).append((key, pts))
+        for unit, group in byunit.items():
+            charts.append(svg_chart(group, unit, frm, to))
+    else:
+        charts.append("<p class=note>系列を選んで「表示」。同一単位は重ね描き。</p>")
+
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>agriha history</title>
+<style>{CSS}</style></head><body>
+<header>🌱 agriha — history<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a></header>
+<div class=wrap style=display:block>
+<form method=get action=/history>
+<div class=controls>{rads}<button type=submit style=margin-left:12px>表示</button></div>
+<div class=controls>{''.join(boxes)}</div>
+</form>
+{''.join(charts)}
+<p class=note>raw 30日＋5分平均(集約)。最大600点に間引き。</p>
+</div></body></html>"""
 
 # ---------- HTTP ----------
 class H(BaseHTTPRequestHandler):
@@ -209,6 +336,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/schedule"):
             self._send(page_schedule())
+        elif self.path.startswith("/history"):
+            self._send(page_history(parse_qs(urlparse(self.path).query)))
         elif self.path == "/" or self.path.startswith("/index"):
             self._send(page_dashboard())
         else:
