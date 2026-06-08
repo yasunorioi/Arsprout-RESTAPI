@@ -1,0 +1,13 @@
+[Unit]
+Description=agriha control logic controller (SWT_RULE etc.)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/agriha_controller.py
+WorkingDirectory=/home/pi
+Restart=always
+RestartSec=5
+User=pi
+[Install]
+WantedBy=multi-user.target

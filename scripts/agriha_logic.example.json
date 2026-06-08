@@ -1,0 +1,54 @@
+{
+  "site": { "lat": 35.0, "lon": 135.0, "tz": 9 },
+  "logics": [
+    {
+      "id": "co2_h2",
+      "name": "CO2制御",
+      "type": "SWT_RULE",
+      "enabled": true,
+      "dry_run": true,
+      "house": "2",
+      "actuator": { "kind": "relay", "ch": 7 },
+      "execute_interval": 10,
+      "conditions": [
+        {
+          "name": "晴天施用(無換気)",
+          "match": "AND",
+          "window": { "start": { "anchor": "sunrise", "offset": 30 }, "end": { "anchor": "sunset", "offset": -30 } },
+          "rules": [
+            { "in": "agriha/2/sensor/InAirCO2", "op": "LE", "val": 800 },
+            { "in": "agriha/farm/weather/WRadiation", "op": "GE", "val": 0.2 },
+            { "in": "agriha/2/window/1#pct", "op": "LE", "val": 20 }
+          ],
+          "action": { "type": "timer_repeat", "on": 300, "off": 600 }
+        },
+        { "name": "OFF", "rules": [], "action": { "type": "off" } }
+      ]
+    },
+    {
+      "id": "hum_h2",
+      "name": "加湿(湿度)制御",
+      "type": "SWT_RULE",
+      "enabled": true,
+      "dry_run": true,
+      "house": "2",
+      "actuator": { "kind": "relay", "ch": 8 },
+      "execute_interval": 10,
+      "conditions": [
+        {
+          "name": "過乾燥",
+          "match": "AND",
+          "rules": [ { "in": "agriha/2/sensor/InAirHumid", "op": "LE", "val": 50 } ],
+          "action": { "type": "timer_repeat", "on": 30, "off": 180 }
+        },
+        {
+          "name": "乾燥",
+          "match": "AND",
+          "rules": [ { "in": "agriha/2/sensor/InAirHumid", "op": "LE", "val": 65 } ],
+          "action": { "type": "timer_repeat", "on": 30, "off": 600 }
+        },
+        { "name": "OFF", "rules": [], "action": { "type": "off" } }
+      ]
+    }
+  ]
+}
