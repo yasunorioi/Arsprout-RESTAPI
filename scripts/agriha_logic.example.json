@@ -31,6 +31,44 @@
       ]
     },
     {
+      "id": "crtn_h2",
+      "name": "カーテン制御",
+      "type": "STD_CRTN",
+      "enabled": true,
+      "dry_run": true,
+      "house": "2",
+      "thermal": {
+        "actuator": { "kind": "window", "wid": 3 },
+        "temp_in": "agriha/2/sensor/InAirTemp",
+        "close_temp": 14, "open_temp": 15, "closed_pos": 100, "open_pos": 0,
+        "window": { "start": { "anchor": "sunset", "offset": 0 }, "end": { "anchor": "sunrise", "offset": 0 } }
+      },
+      "shading": {
+        "actuator": { "kind": "window", "wid": 4 },
+        "rad_in": "agriha/farm/weather/WRadiation",
+        "close_rad": 1.0, "hysteresis": 0.1, "shaded_pos": 100, "open_pos": 0, "overtime_action": "open",
+        "window": { "start": { "anchor": "sunrise", "offset": 120 }, "end": { "anchor": "sunset", "offset": -120 } }
+      }
+    },
+    {
+      "id": "irri_h2",
+      "name": "灌水制御",
+      "type": "STD_IRRI",
+      "enabled": true,
+      "dry_run": true,
+      "house": "2",
+      "actuator": { "kind": "relay", "ch": 4 },
+      "slots": [
+        { "time": { "anchor": "fixed", "time": "08:00" }, "duration_sec": 180, "enabled": true },
+        { "time": { "anchor": "sunrise", "offset": 60 }, "duration_sec": 120, "enabled": false }
+      ],
+      "rad_integral": {
+        "rad_in": "agriha/farm/weather/WRadiation",
+        "threshold": 1.0, "irri_sec": 120, "min_interval_sec": 1800,
+        "window": { "start": { "anchor": "fixed", "time": "07:00" }, "end": { "anchor": "fixed", "time": "17:00" } }
+      }
+    },
+    {
       "id": "co2_h2",
       "name": "CO2制御",
       "type": "SWT_RULE",

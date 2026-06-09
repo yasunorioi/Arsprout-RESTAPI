@@ -327,6 +327,124 @@ class Controller:
                 elif a.get("kind") == "relay":
                     mqtt_pub(f"agriha/{house}/relay/{a.get('ch')}/set", json.dumps({"value": val}))
 
+    # ---------- STD_CRTN（カーテン制御: 保温[温度]＋遮光[日射]）----------
+    def _crtn_thermal(self, cfg, st, now_min, sr, ss):
+        """保温カーテン: 寒い→閉(保温)/暖かい→開。ヒステリシス。時間帯外(日中)は開。"""
+        closed = float(cfg.get("closed_pos", 100)); opened = float(cfg.get("open_pos", 0))
+        if not in_window(cfg.get("window"), now_min, sr, ss):
+            st["thermal"] = opened
+            return opened
+        temp = get_value(self.cache, cfg.get("temp_in", ""))
+        if temp is None:
+            return st.get("thermal")
+        ct = float(cfg.get("close_temp", 14)); ot = float(cfg.get("open_temp", 15))
+        cur = st.get("thermal")
+        if temp <= ct:
+            cur = closed
+        elif temp >= ot:
+            cur = opened
+        if cur is None:
+            cur = opened
+        st["thermal"] = cur
+        return cur
+
+    def _crtn_shading(self, cfg, st, now_min, sr, ss):
+        """遮光カーテン: 強日射→遮光(閉)/弱→開。ヒステリシス。時間帯外は overtime_action。"""
+        shaded = float(cfg.get("shaded_pos", 100)); opened = float(cfg.get("open_pos", 0))
+        if not in_window(cfg.get("window"), now_min, sr, ss):
+            st["shading"] = shaded if cfg.get("overtime_action", "open") == "close" else opened
+            return st["shading"]
+        rad = get_value(self.cache, cfg.get("rad_in", ""))
+        if rad is None:
+            return st.get("shading")
+        cr = float(cfg.get("close_rad", 1.0)); hys = float(cfg.get("hysteresis", 0.1))
+        cur = st.get("shading")
+        if rad >= cr:
+            cur = shaded
+        elif rad <= cr - hys:
+            cur = opened
+        if cur is None:
+            cur = opened
+        st["shading"] = cur
+        return cur
+
+    def eval_std_crtn(self, lg, now_min, sr, ss, now):
+        st = self.state.setdefault(lg["id"], {"thermal": None, "shading": None, "last": None, "last_pub": 0})
+        out = {}
+        if lg.get("thermal"):
+            out["thermal"] = self._crtn_thermal(lg["thermal"], st, now_min, sr, ss)
+        if lg.get("shading"):
+            out["shading"] = self._crtn_shading(lg["shading"], st, now_min, sr, ss)
+        out = {k: v for k, v in out.items() if v is not None}
+        snap = json.dumps(out, sort_keys=True)
+        if snap == st["last"] and (now - st["last_pub"]) < STATE_REFRESH:
+            return
+        st["last"] = snap; st["last_pub"] = now
+        house = str(lg.get("house"))
+        mqtt_pub(f"agriha/{house}/logic/{lg['id']}/state",
+                 json.dumps({"out": out, "dry_run": bool(lg.get("dry_run", True)), "ts": int(now)}, ensure_ascii=False),
+                 retain=True)
+        if lg.get("dry_run", True):
+            mqtt_pub(f"agriha/{house}/logic/{lg['id']}/cmd",
+                     json.dumps({"out": out, "ts": int(now)}, ensure_ascii=False))
+        else:
+            for sub in ("thermal", "shading"):
+                cfg = lg.get(sub)
+                if cfg and sub in out:
+                    a = cfg.get("actuator", {})
+                    if a.get("kind") == "window":
+                        mqtt_pub(f"agriha/{house}/window/{a.get('wid')}/set", json.dumps({"value": out[sub]}))
+                    elif a.get("kind") == "relay":
+                        mqtt_pub(f"agriha/{house}/relay/{a.get('ch')}/set", json.dumps({"value": out[sub]}))
+
+    # ---------- STD_IRRI（灌水: 時刻スロット＋日射積算トリガ）----------
+    def eval_std_irri(self, lg, now_min, sr, ss, now):
+        st = self.state.setdefault(lg["id"], {"accum": 0.0, "last_irri": 0, "pulse_end": 0,
+                                              "fired": set(), "day": None, "last_t": now,
+                                              "last_out": None, "last_pub": 0})
+        today = datetime.date.today()
+        if st["day"] != today:
+            st["day"] = today; st["accum"] = 0.0; st["fired"] = set()
+        dt = max(0.0, min(5.0, now - st["last_t"])); st["last_t"] = now
+        # 時刻スロット（その分に入ったら 1 回 duration 秒のパルス）
+        for i, slot in enumerate(lg.get("slots", [])):
+            if not slot.get("enabled"):
+                continue
+            tmin = anchor_min(slot.get("time"), sr, ss)
+            if tmin is None:
+                continue
+            if i not in st["fired"] and 0 <= (now_min - tmin) < 1.0:
+                st["fired"].add(i)
+                st["pulse_end"] = now + float(slot.get("duration_sec", 0))
+                print(f"[ctrl] {lg['id']} slot{i} fire {slot.get('duration_sec')}s", flush=True)
+        # 日射積算トリガ
+        ri = lg.get("rad_integral")
+        if ri and in_window(ri.get("window"), now_min, sr, ss):
+            rad = get_value(self.cache, ri.get("rad_in", ""))
+            if rad is not None and rad > 0:
+                st["accum"] += rad * dt / 1000.0          # kW/m²·s → MJ/m²
+            if st["accum"] >= float(ri.get("threshold", 1.0)) and \
+                    (now - st["last_irri"]) >= float(ri.get("min_interval_sec", 0)):
+                st["pulse_end"] = now + float(ri.get("irri_sec", 0))
+                st["last_irri"] = now; st["accum"] = 0.0
+                print(f"[ctrl] {lg['id']} rad-integral fire {ri.get('irri_sec')}s", flush=True)
+        out = 1 if now < st["pulse_end"] else 0
+        changed = (out != st["last_out"]) or (now - st["last_pub"]) >= STATE_REFRESH
+        if not changed:
+            return
+        st["last_out"] = out; st["last_pub"] = now
+        house = str(lg.get("house"))
+        mqtt_pub(f"agriha/{house}/logic/{lg['id']}/state",
+                 json.dumps({"out": out, "accum": round(st["accum"], 3),
+                             "pulse_left": max(0, round(st["pulse_end"] - now, 1)),
+                             "dry_run": bool(lg.get("dry_run", True)), "ts": int(now)}, ensure_ascii=False),
+                 retain=True)
+        act = lg.get("actuator", {})
+        if lg.get("dry_run", True):
+            mqtt_pub(f"agriha/{house}/logic/{lg['id']}/cmd", json.dumps({"value": out, "ts": int(now)}))
+        elif act.get("kind") == "relay":
+            mqtt_pub(f"agriha/{house}/relay/{act.get('ch')}/set", json.dumps({"value": out}))
+
     def tick(self):
         self.load()
         sr, ss = self.sun_today()
@@ -343,7 +461,10 @@ class Controller:
                 self.publish(lg, cond, out, now)
             elif t == "STD_ATMP":
                 self.eval_std_atmp(lg, now_min, sr, ss, now)
-            # 今後: STD_CRTN / STD_IRRI をここに追加
+            elif t == "STD_CRTN":
+                self.eval_std_crtn(lg, now_min, sr, ss, now)
+            elif t == "STD_IRRI":
+                self.eval_std_irri(lg, now_min, sr, ss, now)
 
     def run(self):
         print(f"[ctrl] start. conf={CONF_FILE}", flush=True)
