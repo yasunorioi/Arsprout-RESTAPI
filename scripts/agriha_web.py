@@ -15,6 +15,11 @@ SCHED_FILE = "/home/pi/agriha_schedule.json"
 DB_FILE = "/home/pi/agriha_history.db"   # agriha_logger.py が書く時系列DB
 PALETTE = ["#6cf", "#ffd24d", "#7fd", "#f88", "#c9f", "#8f8", "#fb7", "#9cf"]
 RANGES = [("1h", 3600), ("6h", 21600), ("24h", 86400), ("7d", 604800), ("30d", 2592000)]
+LOGIC_FILE = "/home/pi/agriha_logic.json"   # agriha_controller.py が mtime で自動再読込
+try:
+    import agriha_suntime as _sun
+except Exception:
+    _sun = None
 
 # ---------- MQTT snapshot ----------
 def snapshot():
@@ -86,6 +91,8 @@ button{background:#2563eb;color:#fff;border:0;padding:8px 18px;border-radius:6px
 .chk{display:inline-block;margin:2px 12px 2px 0;font-size:12px;color:#ccd;white-space:nowrap}
 .rg{margin-right:12px;font-size:13px;color:#cde}
 svg{max-width:100%;margin-bottom:12px}
+.badge{font-size:11px;padding:1px 7px;border-radius:9px;margin-left:8px}
+.badge.dry{background:#3a3420;color:#ffd24d}.badge.live{background:#15401f;color:#6f6}
 """
 
 def kv_table(d, cls=""):
@@ -144,7 +151,7 @@ def page_dashboard():
     return f"""<!doctype html><html><head><meta charset=utf-8>
 <meta http-equiv=refresh content=10><title>agriha</title><style>{CSS}</style></head><body>
 <header>🌱 agriha <span class=age>{time.strftime('%H:%M:%S')} · 10s refresh</span>
-<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a></header>
+<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a><a href=/logic>logic</a></header>
 <div class=wrap>{''.join(cards)}</div>
 <p class=note>retained snapshot via mosquitto_sub. window: 現在%→目標% ▶/■ source。</p>
 </body></html>"""
@@ -193,7 +200,7 @@ def page_schedule(msg=""):
     txt = html.escape(sched_to_text(load_sched()))
     return f"""<!doctype html><html><head><meta charset=utf-8><title>agriha schedule</title>
 <style>{CSS}</style></head><body>
-<header>🌱 agriha — setpoint schedule<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a></header>
+<header>🌱 agriha — setpoint schedule<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a><a href=/logic>logic</a></header>
 <div class=wrap><div class=card style=min-width:520px>
 <h2>時間帯別 目標室温（℃）</h2>
 <p class=note>1行=1ハウス。書式: <code>house: HH:MM=temp, HH:MM=temp, ...</code>（例 <code>2: 06:00=22, 10:00=26, 20:00=20</code>）。
@@ -313,7 +320,7 @@ def page_history(qs):
 
     return f"""<!doctype html><html><head><meta charset=utf-8><title>agriha history</title>
 <style>{CSS}</style></head><body>
-<header>🌱 agriha — history<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a></header>
+<header>🌱 agriha — history<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a><a href=/logic>logic</a></header>
 <div class=wrap style=display:block>
 <form method=get action=/history>
 <div class=controls>{rads}<button type=submit style=margin-left:12px>表示</button></div>
@@ -322,6 +329,80 @@ def page_history(qs):
 {''.join(charts)}
 <p class=note>raw 30日＋5分平均(集約)。最大600点に間引き。</p>
 </div></body></html>"""
+
+# ---------- logic editor ----------
+def load_logic_text():
+    try:
+        with open(LOGIC_FILE) as f:
+            return f.read()
+    except Exception:
+        return '{\n  "site": { "lat": 35.0, "lon": 135.0, "tz": 9 },\n  "logics": []\n}'
+
+def logic_states(data):
+    """snapshot から agriha/{house}/logic/{id}/state を拾う → [(house,id,parsed)]。"""
+    out = []
+    for topic, payload in data.items():
+        p = topic.split("/")
+        if len(p) == 5 and p[2] == "logic" and p[4] == "state":
+            out.append((p[1], p[3], pj(payload) or {}))
+    return sorted(out, key=lambda x: (x[0], x[1]))
+
+def fmt_logic_state(st):
+    parts = []
+    for k in ("period", "cond"):
+        if st.get(k) is not None:
+            parts.append(f"{k}=<b>{html.escape(str(st[k]))}</b>")
+    o = st.get("out")
+    if isinstance(o, dict):
+        parts.append("out=" + html.escape(json.dumps(o, ensure_ascii=False)))
+    elif o is not None:
+        parts.append(f"out=<b>{html.escape(str(o))}</b>")
+    for k in ("temp", "wind", "pos_cap", "accum", "pulse_left"):
+        if st.get(k) is not None:
+            parts.append(f"{k}={html.escape(str(st[k]))}")
+    return " · ".join(parts) or "—"
+
+def page_logic(msg=""):
+    data = snapshot()
+    suninfo = ""
+    conf = None
+    try:
+        conf = json.loads(load_logic_text())
+    except Exception:
+        conf = None
+    if _sun and conf:
+        try:
+            import datetime as _dt
+            site = conf.get("site", {})
+            sr, ss = _sun.sun_times(site.get("lat", 35.0), site.get("lon", 135.0), _dt.date.today(), site.get("tz", 9))
+            suninfo = f"☀ 日の出 {_sun.hhmm(sr)} / 日の入り {_sun.hhmm(ss)}"
+        except Exception:
+            suninfo = ""
+    cards = []
+    for house, lid, st in logic_states(data):
+        dry = st.get("dry_run", True)
+        badge = "<span class='badge dry'>dry_run</span>" if dry else "<span class='badge live'>LIVE</span>"
+        cards.append(f"<div class=card><h2>{html.escape(house)} / {html.escape(lid)}{badge}</h2>"
+                     f"<div class=note>{fmt_logic_state(st)}</div></div>")
+    if not cards:
+        cards.append("<div class=card>logic state なし（agriha-controller 稼働中？ dry_run でも state は出ます）</div>")
+    txt = html.escape(load_logic_text())
+    nav = "<a href=/>dashboard</a><a href=/schedule>schedule</a><a href=/history>history</a><a href=/logic>logic</a>"
+    return f"""<!doctype html><html><head><meta charset=utf-8><title>agriha logic</title>
+<style>{CSS}</style></head><body>
+<header>🌱 agriha — logic <span class=age>{html.escape(suninfo)}</span>{nav}</header>
+<div class=wrap style=display:block>
+<div style="display:flex;flex-wrap:wrap;gap:12px">{''.join(cards)}</div>
+<div class=card style="min-width:560px;margin-top:12px">
+<h2>logic config（agriha_logic.json）</h2>
+<p class=note>全ロジックのJSON。保存で controller が自動再読込（再起動不要）。
+時間制御は <code>anchor</code>=sunrise/sunset/fixed ＋ <code>offset</code>(分)。
+<code>dry_run</code>:true は実作動せず <code>logic/{{id}}/cmd</code> に意図のみ publish。
+type: SWT_RULE / STD_ATMP / STD_CRTN / STD_IRRI。</p>
+<form method=post action=/api/logic onsubmit="return true">
+<textarea name=conf style="height:440px">{txt}</textarea><br><br>
+<button type=submit>保存</button><span class=msg>{html.escape(msg)}</span>
+</form></div></div></body></html>"""
 
 # ---------- HTTP ----------
 class H(BaseHTTPRequestHandler):
@@ -336,6 +417,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/schedule"):
             self._send(page_schedule())
+        elif self.path.startswith("/logic"):
+            self._send(page_logic())
         elif self.path.startswith("/history"):
             self._send(page_history(parse_qs(urlparse(self.path).query)))
         elif self.path == "/" or self.path.startswith("/index"):
@@ -361,6 +444,22 @@ class H(BaseHTTPRequestHandler):
                 self._send(page_schedule(f"✓ 保存しました ({len(sched)} houses)"))
             except Exception as e:
                 self._send(page_schedule(f"✗ エラー: {e}"))
+        elif self.path == "/api/logic":
+            n = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(n).decode("utf-8", "replace")
+            text = parse_qs(body).get("conf", [""])[0]
+            try:
+                obj = json.loads(text)
+                if not isinstance(obj, dict) or not isinstance(obj.get("logics"), list):
+                    raise ValueError("トップレベルに配列 'logics' が必要です")
+                for lg in obj["logics"]:
+                    if "id" not in lg or "type" not in lg:
+                        raise ValueError("各 logic に id と type が必要です")
+                with open(LOGIC_FILE, "w") as f:
+                    json.dump(obj, f, ensure_ascii=False, indent=2)
+                self._send(page_logic(f"✓ 保存しました（{len(obj['logics'])} logics・controller 自動再読込）"))
+            except Exception as e:
+                self._send(page_logic(f"✗ エラー: {e}"))
         else:
             self._send("not found", 404, "text/plain")
 
