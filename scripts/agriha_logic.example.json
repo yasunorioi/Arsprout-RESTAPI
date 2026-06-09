@@ -2,6 +2,35 @@
   "site": { "lat": 35.0, "lon": 135.0, "tz": 9 },
   "logics": [
     {
+      "id": "atmp_h2",
+      "name": "気温制御",
+      "type": "STD_ATMP",
+      "enabled": true,
+      "dry_run": true,
+      "house": "2",
+      "inputs": {
+        "temp": "agriha/2/sensor/InAirTemp",
+        "wind": "agriha/farm/weather/WWindSpeed",
+        "wind_dir": "agriha/farm/weather/WWindDir16",
+        "rain": "agriha/farm/weather/WRainfallAmt"
+      },
+      "actuators": [
+        { "id": "win_e", "role": "window", "kind": "window", "wid": 1, "open_limit": 100, "close_limit": 0, "windward": [3, 4, 5] },
+        { "id": "win_w", "role": "window", "kind": "window", "wid": 2, "open_limit": 100, "close_limit": 0, "windward": [11, 12, 13] },
+        { "id": "fan", "role": "fan", "kind": "relay", "ch": 5 },
+        { "id": "heater", "role": "heater", "kind": "relay", "ch": 6 }
+      ],
+      "safety": { "warn1": 5, "warn1_pos": 30, "warn2": 8, "warn2_pos": 10, "alert": 10, "hold_sec": 300, "rain": 0.1, "rain_pos": 10, "wind_required": true },
+      "periods": [
+        { "name": "朝", "start": { "anchor": "sunrise", "offset": 0 }, "end": { "anchor": "fixed", "time": "10:00" },
+          "band": 3, "deadband": 0.5, "targets": { "win_e": 24, "win_w": 24, "fan": 26, "heater": 18 } },
+        { "name": "日中", "start": { "anchor": "fixed", "time": "10:00" }, "end": { "anchor": "fixed", "time": "16:00" },
+          "band": 3, "deadband": 0.5, "targets": { "win_e": 26, "win_w": 26, "fan": 28, "heater": 18 } },
+        { "name": "夜", "start": { "anchor": "fixed", "time": "16:00" }, "end": { "anchor": "sunrise", "offset": 0 },
+          "band": 3, "deadband": 0.5, "targets": { "win_e": 22, "win_w": 22, "fan": 25, "heater": 16 } }
+      ]
+    },
+    {
       "id": "co2_h2",
       "name": "CO2制御",
       "type": "SWT_RULE",
