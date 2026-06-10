@@ -1,0 +1,14 @@
+[Unit]
+Description=agriha ccm_rp uptime logger (reboot/brownout monitor)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/ccm_uptime_logger.py
+Restart=always
+RestartSec=5
+User=pi
+
+[Install]
+WantedBy=multi-user.target
