@@ -11,6 +11,13 @@
 # モーター突入のブラウンアウトで基板がリブートすると uptime が 0 付近に戻るので、
 # このグラフで「窓駆動のたびに落ちてるか／頻度」が見える。電源対策(電源分離/NTC/
 # バルクコン)の要否判断に使う。
+#
+# uptime に加えて relay_state(8ch ビットマスク int, 0=全OFF)も同じ /api/state から
+# 取って publish する:
+#   agriha/<scope>/sys/<node>/relay_state = {"value":<int>,"unit":"","ts":<epoch>} (retain)
+# これで「リセット直前にリレーが通電(駆動)していたか」が history に co-sample で残り、
+# 駆動ブラウンアウト(relay_state≠0 で落ちる) か 純電源マージン不足(idle=0 で落ちる) を
+# 後から客観判定できる。ノード側 MQTT publish の生死に依存しない(HTTP 経路)。
 import json, time, subprocess, urllib.request
 
 # 監視対象（node名 -> IP）。増やす時はここに追記。
@@ -31,26 +38,44 @@ def pub(topic, payload):
 
 
 print(f"[ccm-uptime] polling {list(NODES)} every {INTERVAL}s", flush=True)
-last = {}
+last = {}        # node -> 直近 uptime
+last_rs = {}     # node -> 直近 relay_state(駆動判定用)
 while True:
     for node, ip in NODES.items():
         ts = int(time.time())
         topic = f"agriha/{SCOPE}/sys/{node}/uptime"
+        rs_topic = f"agriha/{SCOPE}/sys/{node}/relay_state"
         try:
             d = json.load(urllib.request.urlopen(f"http://{ip}/api/state", timeout=5))
             up = int(d.get("uptime", -1))
+            rs = int(d.get("relay_state", -1))
         except Exception:
             up = None
+            rs = None
         if up is None or up < 0:
             # 到達不能 = 落ちてる/再起動中。null を publish（系列に欠損として残る）
             pub(topic, json.dumps({"value": None, "unit": "s", "ts": ts}))
+            pub(rs_topic, json.dumps({"value": None, "unit": "", "ts": ts}))
             print(f"  {node} unreachable", flush=True)
             last.pop(node, None)
+            last_rs.pop(node, None)
             continue
         pub(topic, json.dumps({"value": up, "unit": "s", "ts": ts}))
+        if rs is not None and rs >= 0:
+            pub(rs_topic, json.dumps({"value": rs, "unit": "", "ts": ts}))
         prev = last.get(node)
         if prev is not None and up < prev:
+            # リセット直前(=今回ドロップ前に最後に観測した relay_state)で駆動していたか
+            prev_rs = last_rs.get(node)
+            if prev_rs is None or prev_rs < 0:
+                drive = "直前リレー不明"
+            elif prev_rs == 0:
+                drive = "直前リレー=0(アイドル→純電源マージン疑い)"
+            else:
+                drive = f"直前 relay_state=0x{prev_rs:02X}(駆動中→突入ブラウンアウト疑い)"
             print(f"  [REBOOT] {node} uptime {prev}s -> {up}s "
-                  f"(ブラウンアウト/再起動の可能性)", flush=True)
+                  f"(ブラウンアウト/再起動の可能性) {drive}", flush=True)
         last[node] = up
+        if rs is not None and rs >= 0:
+            last_rs[node] = rs
     time.sleep(INTERVAL)
