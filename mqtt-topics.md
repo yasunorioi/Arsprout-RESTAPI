@@ -1,7 +1,16 @@
 # MQTTトピック設計書 — unipi-daemon (AgriHA)
 
+**Rev. 2 — 2026-09-20**
+
 > 生成元ソース: `services/unipi-daemon/` 配下の各ファイルを直接読んで記述
 > 対象コード: `mqtt_relay_bridge.py`, `sensor_loop.py`, `ccm_receiver.py`, `emergency_override.py`, `main.py`, `config.yaml`
+
+## 改訂履歴
+
+| Rev | 日付 | 内容 |
+|-----|------|------|
+| 2 | 2026-09-20 | `farm` スコープを気象だけでなく**農場共有設備**に拡張し §2.7 を新設（No.2/No.3 共通給水タンク水温計の設置に伴う）。§0.3 に**限定子付き型名**の規則を追加し、実運用が先行していた `WaterTemp*` 族を明文化。§0.6「トピックのライフサイクル」を新設（既定値に居座るな・改名時の retain 掃除）。§0.1 に `{house_id}` の実値を注記。 |
+| 1 | — | 初版（`services/unipi-daemon/` から起こした設計書） |
 
 ---
 
@@ -31,14 +40,25 @@ agriha/<scope>/<category>/<name>
 ```
 | 要素 | 値 | 意味 |
 |------|-----|------|
-| `<scope>` | `{house_id}`（例 `h01`） | **ハウス局所**データ（そのハウス内のみ意味を持つ） |
-| `<scope>` | `farm` | **農場共有(public)**データ（全ハウスが参照しうる：屋外気象・日射・風） |
+| `<scope>` | `{house_id}` | **ハウス局所**データ（そのハウス内のみ意味を持つ） |
+| `<scope>` | `farm` | **農場共有(public)**データ（複数ハウスが参照しうる：屋外気象・日射・風・**共有設備**） |
 | `<category>` | `sensor` / `relay` / `actuator` / `weather` / `emergency` / `ccm` / `sys` | 種別 |
-| `<name>` | **UECS-CCM 型名**（`InAirTemp` 等） | 下記 0.3 の正準語彙のみ使用 |
+| `<name>` | **UECS-CCM 型名**（`InAirTemp` 等） | 下記 0.3 の語彙 |
 
-- **局所 vs 共有の判定**: 値が「このハウス固有」か「農場全体で共通」か。
-  室内環境(InAir*/Soil*)＝局所、屋外気象(W*)・日射＝共有。
-- 局所は `agriha/{house_id}/sensor/{type}`、共有は **`agriha/farm/weather/{type}`**（§2.5）。
+> **`{house_id}` の実値**: `config.yaml: daemon.house_id` の既定は `h01` だが、
+> **稼働中のブローカでは `1` / `2` / `3`**（`agriha/2/sensor/...`）。
+> 新規ノードは必ず実運用側の採番に合わせること。
+
+- **局所 vs 共有の判定**: 値が「このハウス固有」か「複数ハウスで共通」か。
+  室内環境(InAir*/Soil*)＝局所、屋外気象(W*)・日射＝共有、
+  **複数ハウスが共用する設備**（共通の給水タンク・ポンプ・貯水槽など）＝共有。
+- 局所は `agriha/{house_id}/sensor/{type}`、
+  共有の気象は **`agriha/farm/weather/{type}`**（§2.5）、
+  共有の**設備**は **`agriha/farm/sensor/{type}`**（§2.7）。
+
+> **共有設備を片方のハウスに置かない**。物理的に1個のものを
+> `agriha/2/...` と `agriha/3/...` の両方へ publish すると、1つのセンサーに2系列ができて
+> 必ず乖離する。1個の物理量は1トピック（§0.2）に置き、両ハウスがそれを参照する。
 
 ### 0.2 1値1トピック原則
 - **1 つの物理量＝1 トピック**（`agriha/farm/weather/WWindSpeed` 等）。
@@ -51,6 +71,31 @@ agriha/<scope>/<category>/<name>
 - 土壌: `SoilTemp` `SoilEC` `SoilWC`
 - 屋外/農場共有: `WAirTemp` `WAirHumid` `WWindSpeed` `WWindDir` `WRainfallAmt` `WRadiation`(日射) `IntgRadiation`
 - アクチュエータ: `VenSdWin` `CirHoriFan` `Irri` `LsCrtn` 等（開度% or ON/OFF）
+- 水温: `WaterTemp` 族（下記 0.3.1。**UECS 語彙に該当型が無いため農場独自**）
+
+#### 0.3.1 限定子付き型名（同じ量が同一スコープに複数あるとき）
+同種の量が同じスコープに複数ある場合、**`/2` のようなインスタンス番号では区別しない**。
+番号は意味を持たず、機器を入れ替えた瞬間に何番が何だったか分からなくなる。
+**型名の末尾に短い物理的descriptorを付ける**。
+
+```
+<基本型><descriptor>      例: WaterTempTap, WaterTempNear, WaterTempPump,
+                              WaterTempFar, WaterTempTank
+```
+
+稼働中の実例（いずれも DS18B20 ノード。`agri-temp-poe` / `agri-temp-wifi`）:
+
+| トピック | 実体 |
+|---|---|
+| `agriha/1/sensor/WaterTempTap` | house1 蛇口 |
+| `agriha/2/sensor/WaterTempNear` | house2 近側 |
+| `agriha/2/sensor/WaterTempPump` | house2 ポンプ |
+| `agriha/3/sensor/WaterTempFar` | house3 遠側 |
+| `agriha/farm/sensor/WaterTempTank` | **No.2/No.3 共用の給水タンク**（§2.7） |
+
+> インスタンス番号を使ってよいのは、**同一機器の同格なチャンネル**に限る
+> （`actuator/Relay/2`、`actuator/VenSdWinrcA/2` のような物理 ch 番号）。
+> センサーの measurand を番号で区別してはならない。
 
 ### 0.4 ペイロード規約（統一 JSON）
 センサー/計測値は次の統一形を基本とする（機器固有の多フィールド blob は例外）:
@@ -69,6 +114,37 @@ agriha/<scope>/<category>/<name>
 | センサー値・状態（sensor/weather/relay state） | 1 | **true** | 起動直後に最新値を即取得（特に風速等の安全系） |
 | 制御コマンド（relay/{ch}/set 等） | 1 | false | コマンドは一過性、retain 厳禁 |
 | CCM ブリッジ（§4・移行期） | 0 | true | 既存実装踏襲 |
+
+### 0.6 トピックのライフサイクル（設置・改名・撤去）
+
+retain を使う設計（§0.5）の裏返しとして、**トピックを変えたら旧トピックを必ず掃除する**。
+以下はいずれも実際に踏んだ事故の再発防止。
+
+**(a) 既定の型名に居座らない。**
+ノードのファームウェアが持つ既定トピック（例 `agriha/{house}/sensor/WaterTemp`）は
+「**まだ設定していません**」を意味する仮の名前。設置したら §0.3.1 の限定子付き型名へ必ず改名する。
+居座ると、次に同じ機種を上げた人が**同じ既定名に着地して衝突**する。
+実際、素の `WaterTemp` 系列には過去に2台の別センサーのデータが混在していた
+（2026-09-20 に履歴ごと削除）。
+
+**(b) 改名したら旧トピックの retain を消す。**
+```bash
+mosquitto_pub -h localhost -t '<旧トピック>' -r -n     # 空ペイロード + retain = 削除
+```
+消さないと**最後の値が永久に retain され、消費側からは生きているように見える**。
+センサーが撤去済みでも「25.06 ℃」を返し続ける。LWT トピック
+（`<prefix>/sys/<node_id>/online`）も同様に掃除する。
+
+**(c) prefix と個別トピックは別フィールド。**
+ノードの `sys_prefix`（LWT 用）を変えても、**スロットごとの publish トピックは追従しない**。
+両方を直すこと。片方だけ直すと `agriha/farm/sys/...` と `agriha/2/sensor/...` のように
+スコープがねじれる。
+
+**(d) 設置前のデータは履歴に残さない。**
+机上で通電した時点から publish は始まるので、履歴の先頭には必ず
+「設置前の室温」が入る。設置後にその区間を削除する
+（電源断のギャップが境界として使える）。残すと
+「その時刻にタンクは25℃だった」という**嘘の記録**になる。
 
 ---
 
@@ -306,6 +382,42 @@ agriha/{house_id}/setpoint/temp
 
 ---
 
+### 2.7 農場共有（public）設備センサー (Publish) — canonical
+
+**複数のハウスが共用する設備**（共通の給水タンク・貯水槽・ポンプなど）に付いたセンサーの正準置き場。
+§2.5 が「屋外気象」の共有なのに対し、こちらは「**設備**」の共有。
+どちらも §0.1 の `farm` スコープ＝「1つのハウスに属さない」という同じ判定基準による。
+
+```
+agriha/farm/sensor/{type}
+```
+
+| 項目 | 値 |
+|------|-----|
+| 方向 | 各センサーノード → broker |
+| QoS | 1 |
+| retain | **True**（§0.5） |
+| `{type}` | §0.3 / §0.3.1 の型名。限定子で設備を示す（`WaterTempTank` 等） |
+
+**現用（2026-09-20〜）:**
+```
+agriha/farm/sensor/WaterTempTank     {"value": 24.12, "unit": "C", "ts": 1789881535}
+agriha/farm/sys/temp_tank_01/online  1 / 0  (LWT, retain)
+```
+No.2 / No.3 共用の給水タンク水温計。実体は `agri-temp-wifi`（M5Stack AtomS3 Lite + DS18B20）、
+ホスト名 `agri-temp-tank.local`。
+
+**なぜ `agriha/2/...` に置かないか:**
+タンクは物理的に1個。どちらかのハウスに属させると非対称になり、
+両方へ publish すると1つのセンサーに2系列ができて必ず乖離する（§0.1 の注記）。
+
+**消費側について:**
+yasu-hp の `agriha_logger` / `agriha_controller` / `uecs_webui` はいずれも
+**`agriha/#` のワイルドカード購読**なので、`farm/sensor` を新設しても購読設定の変更は不要。
+履歴 DB（`/srv/shadow/agriha_history.db`）もトピック駆動で系列を自動生成する。
+
+---
+
 ## 3. 緊急制御トピック (Emergency)
 
 ### 3.1 緊急オーバーライド通知 (Publish)
@@ -461,6 +573,7 @@ SENSOR_TYPES / ACTUATOR_TYPES / WEATHER_TYPES いずれにも該当しない ccm
 | `agriha/{house_id}/sensor/DS18B20` | daemon→broker | 1 | ✓ | `sensor_loop.py` |
 | `agriha/farm/weather/misol` | daemon→broker | 1 | ✓ | `sensor_loop.py` |
 | `agriha/farm/weather/{type}` | sensor→broker | 1 | ✓ | §2.5 canonical |
+| `agriha/farm/sensor/{type}` | sensor→broker | 1 | ✓ | §2.7 canonical（共有設備） |
 | `agriha/{house_id}/setpoint/temp` | brain→broker→node | 1 | ✓ | `setpoint_scheduler`（予定） |
 | `agriha/{house_id}/emergency/override` | daemon→broker | 1 | ✓ | `emergency_override.py` |
 | `agriha/{house_id}/ccm/sensor/{ccm_type}` | daemon→broker | 0 | ✓ | `ccm_receiver.py` |
