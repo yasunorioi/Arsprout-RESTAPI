@@ -1,0 +1,16 @@
+[Unit]
+Description=Misol WH65LP outdoor weather (RS485/CH340) -> agriha/farm/weather/*
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/yasu/shadow-report/misol_weather_pub.py
+Restart=always
+RestartSec=5
+User=yasu
+Group=yasu
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target
