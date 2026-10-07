@@ -1,0 +1,15 @@
+[Unit]
+Description=ArSprout(.81) window decision reason -> agriha/{house}/window/reason/* (read-only)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/yasu/shadow-report/arsprout_logic_reason_pub.py
+Restart=always
+RestartSec=5
+User=yasu
+Group=yasu
+
+[Install]
+WantedBy=multi-user.target
